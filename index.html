@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Talkie-Walkie Web App</title>
+    <!-- Inclusion de la bibliothèque PeerJS -->
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        /* Thème sombre et responsive */
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background-color: #1e1e1e;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+        }
+        h1 {
+            text-align: center;
+            color: #ffffff;
+        }
+        #status {
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+            word-wrap: break-word; /* Pour que l'ID ne dépasse pas */
+        }
+        button {
+            background-color: #333333;
+            color: #ffffff;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #555555;
+        }
+        button:disabled {
+            background-color: #444444;
+            cursor: not-allowed;
+        }
+        input[type="text"] {
+            background-color: #2c2c2c;
+            color: #e0e0e0;
+            border: 1px solid #444444;
+            padding: 10px;
+            width: calc(100% - 22px);
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+        #incoming-call {
+            display: none;
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #282828;
+            border-radius: 4px;
+        }
+        #log {
+            background-color: #1a1a1a;
+            color: #b0b0b0;
+            height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #333333;
+            margin-top: 20px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-size: 0.8em;
+        }
+        audio {
+            display: none; /* L'audio est caché, mais fonctionnel */
+        }
+        @media (max-width: 480px) {
+            .container {
+                padding: 10px;
+            }
+            button {
+                width: 100%;
+                margin: 10px 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Talkie-Walkie</h1>
+        <div id="status">Statut : Déconnecté</div>
+        
+        <!-- Action Initiale -->
+        <button id="enable-mic">Activer le Micro</button>
+        
+        <!-- Section d'Appel -->
+        <div id="call-section" style="display: none;">
+            <input type="text" id="peer-id" placeholder="ID du pair à appeler">
+            <button id="call-btn">Appeler</button>
+            <button id="hangup-btn" style="display: none;">Raccrocher</button>
+        </div>
+        
+        <!-- Section d'Appel Entrant -->
+        <div id="incoming-call">
+            <p id="caller-id">Appel entrant de : [ID]</p>
+            <button id="answer-btn">Répondre</button>
+            <button id="reject-btn">Refuser</button>
+        </div>
+        
+        <!-- Journal de Débogage -->
+        <div id="log"></div>
+        
+        <!-- Élément audio pour le flux distant -->
+        <audio id="remote-audio" autoplay></audio>
+    </div>
+
+    <script>
+        // Variables globales
+        let peer = null;
+        let localStream = null;
+        let currentCall = null;
+        let incomingCall = null;
+        let callTimeout = null;
+
+        const statusEl = document.getElementById('status');
+        const enableMicBtn = document.getElementById('enable-mic');
+        const callSection = document.getElementById('call-section');
+        const peerIdInput = document.getElementById('peer-id');
+        const callBtn = document.getElementById('call-btn');
+        const hangupBtn = document.getElementById('hangup-btn');
+        const incomingCallSection = document.getElementById('incoming-call');
+        const callerIdEl = document.getElementById('caller-id');
+        const answerBtn = document.getElementById('answer-btn');
+        const rejectBtn = document.getElementById('reject-btn');
+        const logEl = document.getElementById('log');
+        const remoteAudio = document.getElementById('remote-audio');
+
+        // Fonction pour ajouter un log avec horodatage
+        function logMessage(message) {
+            const timestamp = new Date().toLocaleString();
+            logEl.innerHTML += `[${timestamp}] ${message}\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        // Mise à jour du statut et gestion des boutons
+        function updateUI(isConnected, isInCall) {
+            if (isConnected) {
+                enableMicBtn.disabled = true;
+                callSection.style.display = 'block';
+            }
+            if (isInCall) {
+                callBtn.disabled = true;
+                hangupBtn.style.display = 'inline-block';
+                statusEl.textContent = 'Appel en cours...';
+            } else {
+                callBtn.disabled = false;
+                hangupBtn.style.display = 'none';
+                statusEl.textContent = `Connecté - Votre ID: ${peer.id}`;
+            }
+        }
+
+        // Initialisation du microphone
+        async function initMicro() {
+            try {
+                logMessage('Demande d\'accès au microphone...');
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                logMessage('Accès au microphone obtenu.');
+                initPeer();
+            } catch (error) {
+                logMessage(`Erreur d'accès au microphone: ${error.message}`);
+                statusEl.textContent = 'Erreur: Accès microphone refusé.';
+            }
+        }
+
+        // Initialisation de PeerJS
+        function initPeer() {
+            logMessage('Initialisation de PeerJS...');
+            
+            // ==================================================================
+            // === MODIFICATION IMPORTANTE POUR VOTRE SERVEUR PERSONNEL ===
+            // ==================================================================
+            // Une fois que votre serveur est déployé sur Render, remplacez
+            // 'votre-serveur.onrender.com' par l'adresse que Render vous a donnée.
+            //
+            // Si vous voulez tester sans serveur personnel, laissez la configuration
+            // par défaut (commentée ci-dessous).
+            // ==================================================================
+            
+            peer = new Peer({
+                host: 'votre-serveur.onrender.com', // <-- REMPLACEZ CECI
+                path: '/mon-app',
+                secure: true,
+                config: {
+                    'iceServers': [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                }
+            });
+
+            /*
+            // --- Configuration par défaut (serveur public) ---
+            // Décommentez ce bloc si vous voulez utiliser le serveur public pour tester
+            peer = new Peer({
+                host: 'mon-peer-server.onrender.com',
+                port: 443,
+                secure: true,
+                config: {
+                    'iceServers': [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                }
+            });
+            */
+
+
+            // Événements PeerJS
+            peer.on('open', (id) => {
+                logMessage(`Connexion établie. Votre ID: ${id}`);
+                updateUI(true, false);
+            });
+
+            peer.on('error', (err) => {
+                logMessage(`Erreur PeerJS: ${err.type} - ${err.message}`);
+                statusEl.textContent = 'Erreur réseau.';
+            });
+
+            peer.on('disconnected', () => {
+                logMessage('Déconnecté du serveur PeerJS.');
+                statusEl.textContent = 'Déconnecté.';
+            });
+
+            // Gestion des appels entrants
+            peer.on('call', (call) => {
+                if (currentCall) {
+                    logMessage('Appel entrant refusé (appel en cours).');
+                    call.close();
+                    return;
+                }
+                logMessage(`Appel entrant de: ${call.peer}`);
+                incomingCall = call;
+                callerIdEl.textContent = `Appel entrant de: ${call.peer}`;
+                incomingCallSection.style.display = 'block';
+                statusEl.textContent = 'Appel entrant...';
+
+                // Timeout pour appel entrant non répondu
+                callTimeout = setTimeout(() => {
+                    if (incomingCall) {
+                        rejectCall();
+                        logMessage('Appel entrant non répondu (timeout).');
+                    }
+                }, 30000); // 30 secondes
+            });
+        }
+
+        // Lancer un appel sortant
+        function makeCall() {
+            const targetId = peerIdInput.value.trim();
+            if (!targetId) {
+                logMessage('ID du pair requis.');
+                return;
+            }
+            if (currentCall) {
+                logMessage('Appel déjà en cours.');
+                return;
+            }
+
+            logMessage(`Appel vers: ${targetId}`);
+            statusEl.textContent = 'Connexion...';
+            const call = peer.call(targetId, localStream);
+            setupCallHandlers(call);
+
+            // Timeout pour appel sortant sans réponse
+            callTimeout = setTimeout(() => {
+                if (currentCall && !currentCall.open) {
+                    hangup();
+                    logMessage('Appel sortant sans réponse (timeout).');
+                }
+            }, 30000); // 30 secondes
+        }
+
+        // Répondre à un appel entrant
+        function answerCall() {
+            if (!incomingCall) return;
+            clearTimeout(callTimeout);
+            logMessage('Réponse à l\'appel entrant.');
+            incomingCall.answer(localStream);
+            setupCallHandlers(incomingCall);
+            incomingCallSection.style.display = 'none';
+            incomingCall = null;
+        }
+
+        // Refuser un appel entrant
+        function rejectCall() {
+            if (!incomingCall) return;
+            clearTimeout(callTimeout);
+            logMessage('Appel entrant refusé.');
+            incomingCall.close();
+            incomingCallSection.style.display = 'none';
+            incomingCall = null;
+            if (peer && peer.id) {
+                statusEl.textContent = `Connecté - Votre ID: ${peer.id}`;
+            }
+        }
+
+        // Configurer les handlers pour un appel (entrant ou sortant)
+        function setupCallHandlers(call) {
+            currentCall = call;
+
+            call.on('stream', (remoteStream) => {
+                logMessage('Flux distant reçu.');
+                remoteAudio.srcObject = remoteStream;
+                updateUI(true, true);
+                clearTimeout(callTimeout);
+            });
+
+            call.on('close', () => {
+                logMessage('Appel terminé.');
+                cleanupCall();
+            });
+
+            call.on('error', (err) => {
+                logMessage(`Erreur d'appel: ${err.message}`);
+                cleanupCall();
+            });
+        }
+
+        // Nettoyage après fin d'appel
+        function cleanupCall() {
+            if (currentCall) {
+                currentCall.close();
+                currentCall = null;
+            }
+            remoteAudio.srcObject = null;
+            if (peer && peer.id) {
+                updateUI(true, false);
+            }
+            incomingCallSection.style.display = 'none';
+            clearTimeout(callTimeout);
+        }
+
+        // Raccrocher manuellement
+        function hangup() {
+            logMessage('Raccrocher.');
+            cleanupCall();
+        }
+
+        // Événements des boutons
+        enableMicBtn.addEventListener('click', initMicro);
+        callBtn.addEventListener('click', makeCall);
+        hangupBtn.addEventListener('click', hangup);
+        answerBtn.addEventListener('click', answerCall);
+        rejectBtn.addEventListener('click', rejectCall);
+
+        logMessage('Application initialisée. Veuillez activer le microphone.');
+    </script>
+</body>
+</html>
